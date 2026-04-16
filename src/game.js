@@ -1,4 +1,11 @@
 const STORAGE_KEY = "suborbital-total-saved";
+const MAX_FRAME_TIME = 0.06;
+const MIN_ORBIT_DECAY = 0.0015;
+const ORBIT_DECAY_SCALE = 0.0023;
+const ORBIT_DECAY_ROUND_SCALE_FACTOR = 6;
+const BASE_ORBIT_SPEED_FACTOR = 8600;
+const CENTRAL_GRAVITY_STRENGTH = 9000;
+const MIN_ORB_GRAVITY_DISTANCE_SQ = 460;
 
 const ORB_TYPES = [
   {
@@ -59,6 +66,16 @@ const saveTotalSaved = (value) => {
   window.localStorage.setItem(STORAGE_KEY, String(Math.max(0, Math.floor(value))));
 };
 
+const getUnlockedOrbs = (totalSaved) => ORB_TYPES.filter((orb) => totalSaved >= orb.unlockAt);
+
+const resolveSelectedOrbId = (selectedOrbId, totalSaved) => {
+  const unlocked = getUnlockedOrbs(totalSaved);
+  if (unlocked.some((orb) => orb.id === selectedOrbId)) {
+    return selectedOrbId;
+  }
+  return unlocked[0]?.id || ORB_TYPES[0].id;
+};
+
 const makePolyPoints = (sides, radius) => {
   const points = [];
   for (let i = 0; i < sides; i += 1) {
@@ -86,6 +103,8 @@ class MenuScene extends Phaser.Scene {
   create() {
     const { width, height } = this.scale;
     const totalSaved = getStoredTotalSaved();
+    const selectedOrb = resolveSelectedOrbId(this.registry.get("selectedOrb") || ORB_TYPES[0].id, totalSaved);
+    this.registry.set("selectedOrb", selectedOrb);
 
     this.add
       .text(width / 2, 120, "SUBORBITAL", {
@@ -110,7 +129,6 @@ class MenuScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    const selectedOrb = this.registry.get("selectedOrb") || ORB_TYPES[0].id;
     const orbName = ORB_TYPES.find((orb) => orb.id === selectedOrb)?.name || ORB_TYPES[0].name;
 
     this.add
@@ -162,7 +180,7 @@ class OrbSelectScene extends Phaser.Scene {
   create() {
     const { width, height } = this.scale;
     const totalSaved = getStoredTotalSaved();
-    const selectedOrb = this.registry.get("selectedOrb") || ORB_TYPES[0].id;
+    const selectedOrb = resolveSelectedOrbId(this.registry.get("selectedOrb") || ORB_TYPES[0].id, totalSaved);
 
     this.add
       .text(width / 2, 74, "SELECT ORB", {
@@ -263,7 +281,11 @@ class GameScene extends Phaser.Scene {
   }
 
   init(data) {
-    this.selectedOrbId = data.selectedOrb || this.registry.get("selectedOrb") || ORB_TYPES[0].id;
+    const totalSaved = getStoredTotalSaved();
+    this.selectedOrbId = resolveSelectedOrbId(
+      data.selectedOrb || this.registry.get("selectedOrb") || ORB_TYPES[0].id,
+      totalSaved,
+    );
   }
 
   create() {
@@ -367,7 +389,8 @@ class GameScene extends Phaser.Scene {
     const x = this.center.x + Math.cos(angle) * spawnRadius;
     const y = this.center.y + Math.sin(angle) * spawnRadius;
     const tangent = angle + Math.PI / 2;
-    const baseSpeed = Math.sqrt(8600 / spawnRadius);
+    // Simplified circular orbit seed speed: v ≈ sqrt(GM / r).
+    const baseSpeed = Math.sqrt(BASE_ORBIT_SPEED_FACTOR / spawnRadius);
     const speed = baseSpeed * Phaser.Math.FloatBetween(0.86, 1.22);
 
     const shape = {
@@ -444,11 +467,11 @@ class GameScene extends Phaser.Scene {
     const dy = this.center.y - shape.y;
     const r2 = Math.max(dx * dx + dy * dy, 280);
     const r = Math.sqrt(r2);
-    const gravity = 9000 / r2;
+    const gravity = CENTRAL_GRAVITY_STRENGTH / r2;
     shape.vx += (dx / r) * gravity * delta;
     shape.vy += (dy / r) * gravity * delta;
 
-    const decay = Math.max(0.0015, (0.0023 * this.round) / 6);
+    const decay = Math.max(MIN_ORBIT_DECAY, (ORBIT_DECAY_SCALE * this.round) / ORBIT_DECAY_ROUND_SCALE_FACTOR);
     shape.vx *= 1 - decay * delta;
     shape.vy *= 1 - decay * delta;
   }
@@ -460,7 +483,7 @@ class GameScene extends Phaser.Scene {
 
     const dx = this.playerOrb.x - shape.x;
     const dy = this.playerOrb.y - shape.y;
-    const r2 = Math.max(dx * dx + dy * dy, 460);
+    const r2 = Math.max(dx * dx + dy * dy, MIN_ORB_GRAVITY_DISTANCE_SQ);
     const r = Math.sqrt(r2);
     const pull = (this.playerOrb.gravity / r2) * this.playerOrb.polarity;
 
@@ -475,7 +498,8 @@ class GameScene extends Phaser.Scene {
   }
 
   update(_, deltaMs) {
-    const delta = Math.min(0.06, deltaMs / 1000);
+    // Cap frame delta to avoid unstable jumps during lag spikes.
+    const delta = Math.min(MAX_FRAME_TIME, deltaMs / 1000);
 
     this.sunCore.rotation += delta * 0.35;
 

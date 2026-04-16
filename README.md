@@ -10,6 +10,7 @@ This project is a browser game built with Phaser 3.
    - `npm install`
 2. From the repository root, run a static server (example):
    - `python3 -m http.server 4173`
+   - Any open port works; `4173` is just an example.
 3. Open `http://localhost:4173` in a browser.
 
 ## Gameplay
