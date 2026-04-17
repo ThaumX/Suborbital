@@ -1,16 +1,40 @@
 const STORAGE_KEY = "suborbital-total-saved";
 const MAX_FRAME_TIME = 0.06;
-const MIN_ORBIT_DECAY = 0.0015;
-const ORBIT_DECAY_SCALE = 0.0023;
+const TARGET_FRAME_RATE = 60;
+const GAMEPLAY_SPEED = 0.25;
+const MIN_ORBIT_DECAY = 0.0009;
+const ORBIT_DECAY_SCALE = 0.0014;
 const ORBIT_DECAY_ROUND_SCALE_FACTOR = 6;
-const BASE_ORBIT_SPEED_FACTOR = 8600;
-const CENTRAL_GRAVITY_STRENGTH = 9000;
+const BASE_ORBIT_SPEED_FACTOR = 2600;
+const CENTRAL_GRAVITY_STRENGTH = 7000;
+const ORB_FORCE_SCALE = 0.36;
+const ORB_APPROACH_FORCE_SCALE = 0.98;
+const ORB_DEPART_FORCE_SCALE = 0.8;
+const ORB_FIELD_VISUAL_FORCE_THRESHOLD = 1.3;
+const ORB_LIFETIME_SECONDS = 2;
+const ORB_FADE_START_SECONDS = 1.5;
+const ORB_MIN_STRENGTH_SCALE = 0.24;
+const ORB_MIN_VISUAL_ALPHA = 0.26;
+const ORB_WEAKEN_FLASH_SPEED = 0.028;
+const ORB_WEAKEN_FLASH_INTENSITY = 0.34;
+const ORB_BOUNDARY_PULSE_SCALE = 0.09;
+const ORB_MAX_EFFECT_FORCE_THRESHOLD = 0.06;
+const MAX_ACTIVE_ORBS = 3;
+const SHAPE_SPIN_SCALE = 0.55;
 const MIN_ORB_GRAVITY_DISTANCE_SQ = 460;
+const SUN_PULSE_SPEED = 0.0024;
+const SUN_PULSE_AMPLITUDE = 0.045;
+const SHAPE_OFFSCREEN_ESCAPE_SECONDS = 2;
+const SHAPE_SPAWN_RADIUS_MIN = 380;
+const SHAPE_SPAWN_RADIUS_MAX = 650;
+const GAME_WORLD_WIDTH = 1800;
+const GAME_WORLD_HEIGHT = 1260;
 
 const ORB_TYPES = [
   {
     id: "pulse",
     name: "Pulse Orb",
+    description: "Balanced attractor that gently guides shapes into stable arcs.",
     unlockAt: 0,
     colorA: 0x3cf6ff,
     colorB: 0x9a8dff,
@@ -24,11 +48,14 @@ const ORB_TYPES = [
   {
     id: "nova",
     name: "Nova Orb",
-    unlockAt: 8,
+    description: "Reversal field that pushes shapes away from itself.",
+    unlockAt: 50,
     colorA: 0xff66f0,
     colorB: 0xffdd66,
     size: 98,
     gravity: 32000,
+    forceScale: 0.28,
+    lifespanSeconds: 1,
     polarity: -1,
     swirl: 0,
     innerSides: 5,
@@ -37,7 +64,8 @@ const ORB_TYPES = [
   {
     id: "vortex",
     name: "Vortex Orb",
-    unlockAt: 20,
+    description: "Twisting pull that bends paths with extra swirl.",
+    unlockAt: 100,
     colorA: 0x5ffff5,
     colorB: 0x66a0ff,
     size: 84,
@@ -46,6 +74,39 @@ const ORB_TYPES = [
     swirl: 12000,
     innerSides: 4,
     outerSides: 7,
+  },
+  {
+    id: "surge",
+    name: "Surge Orb",
+    description: "Boost field that accelerates shapes without changing heading.",
+    unlockAt: 150,
+    colorA: 0x72f7ff,
+    colorB: 0x9fffd0,
+    size: 90,
+    gravity: 28000,
+    forceScale: 0.5,
+    polarity: 1,
+    swirl: 0,
+    forceMode: "velocity-boost",
+    innerSides: 10,
+    outerSides: 5,
+  },
+  {
+    id: "twist",
+    name: "Twist Orb",
+    description: "Strongly redirects travel toward nearest radial in-or-out heading.",
+    unlockAt: 220,
+    colorA: 0xffb86a,
+    colorB: 0xff6f8f,
+    size: 92,
+    gravity: 9000,
+    forceScale: 0.22,
+    polarity: 1,
+    swirl: 0,
+    forceMode: "radial-align",
+    alignStrength: 0.92,
+    innerSides: 7,
+    outerSides: 11,
   },
 ];
 
@@ -76,6 +137,19 @@ const resolveSelectedOrbId = (selectedOrbId, totalSaved) => {
   return unlocked[0]?.id || ORB_TYPES[0].id;
 };
 
+const getOrbFieldRadius = (orb) => {
+  const perOrbForceScale = orb.forceScale ?? 1;
+  const effectiveGravity = orb.gravity * ORB_FORCE_SCALE * perOrbForceScale * ORB_APPROACH_FORCE_SCALE;
+  const radiusFromForce = Math.sqrt(effectiveGravity / ORB_FIELD_VISUAL_FORCE_THRESHOLD);
+  return Math.max(orb.size * 0.7, radiusFromForce);
+};
+
+const getOrbMaxEffectRadius = (orb) => {
+  const perOrbForceScale = orb.forceScale ?? 1;
+  const effectiveGravity = orb.gravity * ORB_FORCE_SCALE * perOrbForceScale * ORB_APPROACH_FORCE_SCALE;
+  return Math.sqrt(effectiveGravity / ORB_MAX_EFFECT_FORCE_THRESHOLD);
+};
+
 const makePolyPoints = (sides, radius) => {
   const points = [];
   for (let i = 0; i < sides; i += 1) {
@@ -93,6 +167,21 @@ const drawWireShape = (graphics, sides, radius, color, alpha = 1) => {
     return;
   }
   graphics.strokePoints(makePolyPoints(sides, radius), true, true);
+};
+
+const drawDottedCircle = (graphics, radius, color, alpha = 0.35, dotCount = 52, fillRatio = 0.55) => {
+  graphics.clear();
+  graphics.lineStyle(1.5, color, alpha);
+
+  const step = (Math.PI * 2) / dotCount;
+  for (let i = 0; i < dotCount; i += 1) {
+    const start = i * step;
+    const end = start + step * fillRatio;
+    graphics.beginPath();
+    graphics.moveTo(Math.cos(start) * radius, Math.sin(start) * radius);
+    graphics.lineTo(Math.cos(end) * radius, Math.sin(end) * radius);
+    graphics.strokePath();
+  }
 };
 
 class MenuScene extends Phaser.Scene {
@@ -198,11 +287,15 @@ class OrbSelectScene extends Phaser.Scene {
 
     ORB_TYPES.forEach((orb, index) => {
       const unlocked = totalSaved >= orb.unlockAt;
-      const y = 200 + index * 150;
+      const y = 200 + index * 168;
+      const panelLeft = -320;
+      const panelTop = -64;
+      const panelWidth = 640;
+      const panelHeight = 128;
 
       const panel = this.add.graphics({ x: width / 2, y });
       panel.lineStyle(2, unlocked ? orb.colorA : 0x404c6a, 0.95);
-      panel.strokeRoundedRect(-320, -55, 640, 110, 16);
+      panel.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 16);
 
       const label = `${orb.name}  ·  ${unlocked ? "UNLOCKED" : `LOCKED (${orb.unlockAt})`}`;
       const text = this.add
@@ -213,13 +306,20 @@ class OrbSelectScene extends Phaser.Scene {
         .setOrigin(0, 0.5);
 
       this.add
-        .text(width / 2 - 236, y + 17, `Size ${orb.size} | Strength ${Math.floor(orb.gravity / 1000)}`, {
-          fontSize: "18px",
+        .text(width / 2 - 236, y + 8, `Size ${orb.size} | Strength ${Math.floor(orb.gravity / 1000)}`, {
+          fontSize: "16px",
           color: unlocked ? "#a3ddff" : "#51617e",
         })
         .setOrigin(0, 0.5);
 
-      const preview = this.add.container(width / 2 + 228, y);
+      this.add
+        .text(width / 2 - 236, y + 34, orb.description, {
+          fontSize: "15px",
+          color: unlocked ? "#91c9ff" : "#4a5d78",
+        })
+        .setOrigin(0, 0.5);
+
+      const preview = this.add.container(width / 2 + 228, y + 2);
       const outer = this.add.graphics();
       const inner = this.add.graphics();
       drawWireShape(outer, orb.outerSides, 30, orb.colorA, unlocked ? 1 : 0.35);
@@ -229,7 +329,7 @@ class OrbSelectScene extends Phaser.Scene {
       this.tweens.add({ targets: inner, angle: -360, duration: 2600, repeat: -1 });
 
       if (unlocked) {
-        panel.setInteractive(new Phaser.Geom.Rectangle(-320, -55, 640, 110), Phaser.Geom.Rectangle.Contains);
+        panel.setInteractive(new Phaser.Geom.Rectangle(panelLeft, panelTop, panelWidth, panelHeight), Phaser.Geom.Rectangle.Contains);
         panel.on("pointerdown", () => {
           this.registry.set("selectedOrb", orb.id);
           this.scene.start("MenuScene");
@@ -237,13 +337,13 @@ class OrbSelectScene extends Phaser.Scene {
         panel.on("pointerover", () => {
           panel.clear();
           panel.lineStyle(2, orb.colorB, 1);
-          panel.strokeRoundedRect(-320, -55, 640, 110, 16);
+          panel.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 16);
           text.setTint(0x66ffea);
         });
         panel.on("pointerout", () => {
           panel.clear();
           panel.lineStyle(2, orb.colorA, 0.95);
-          panel.strokeRoundedRect(-320, -55, 640, 110, 16);
+          panel.strokeRoundedRect(panelLeft, panelTop, panelWidth, panelHeight, 16);
           text.clearTint();
         });
       }
@@ -278,6 +378,7 @@ class GameScene extends Phaser.Scene {
   constructor() {
     super("GameScene");
     this.shapeId = 0;
+    this.playerOrbs = [];
   }
 
   init(data) {
@@ -292,14 +393,13 @@ class GameScene extends Phaser.Scene {
     const { width, height } = this.scale;
     this.center = new Phaser.Math.Vector2(width / 2, height / 2);
     this.sunRadius = 34;
-    this.escapeRadius = Math.max(width, height) * 0.84;
     this.round = 1;
     this.roundScore = 0;
     this.totalSaved = getStoredTotalSaved();
     this.destroyedCount = 0;
     this.shapeId = 0;
     this.activeShapes = [];
-    this.playerOrb = null;
+    this.playerOrbs = [];
     this.gameEnded = false;
 
     this.sunCore = this.add.graphics({ x: this.center.x, y: this.center.y });
@@ -310,6 +410,7 @@ class GameScene extends Phaser.Scene {
       score: this.add.text(20, 42, "", { fontSize: "22px", color: "#95ffc9" }),
       lost: this.add.text(20, 68, "", { fontSize: "22px", color: "#ff92a4" }),
       total: this.add.text(20, 94, "", { fontSize: "22px", color: "#b6c7ff" }),
+      orbs: this.add.text(width - 20, 16, "", { fontSize: "14px", color: "#95c6ff" }).setOrigin(1, 0),
       help: this.add
         .text(width / 2, height - 18, "Click or tap to place orb gravity well", {
           fontSize: "18px",
@@ -346,35 +447,95 @@ class GameScene extends Phaser.Scene {
       return;
     }
 
-    if (this.playerOrb) {
-      this.playerOrb.container.destroy();
-    }
-
     const orbType = ORB_TYPES.find((orb) => orb.id === this.selectedOrbId) || ORB_TYPES[0];
+    const fieldRadius = getOrbFieldRadius(orbType);
+    const maxEffectRadius = getOrbMaxEffectRadius(orbType);
     const container = this.add.container(x, y);
     const outer = this.add.graphics();
     const inner = this.add.graphics();
     const field = this.add.graphics();
+    const maxEffectBoundary = this.add.graphics();
 
     drawWireShape(outer, orbType.outerSides, orbType.size * 0.26, orbType.colorA, 1);
     drawWireShape(inner, orbType.innerSides, orbType.size * 0.16, orbType.colorB, 1);
 
     field.lineStyle(1, orbType.colorA, 0.35);
-    field.strokeCircle(0, 0, orbType.size * 0.5);
+    field.strokeCircle(0, 0, fieldRadius);
+    drawDottedCircle(maxEffectBoundary, maxEffectRadius, orbType.colorB, 0.3);
 
-    container.add([field, outer, inner]);
+    container.add([maxEffectBoundary, field, outer, inner]);
 
-    this.playerOrb = {
+    const orb = {
       ...orbType,
       x,
       y,
+      fieldRadius,
+      maxEffectRadius,
+      field,
+      maxEffectBoundary,
       container,
       outer,
       inner,
+      spawnedAtMs: this.time.now,
+      strengthScale: 1,
     };
+
+    this.playerOrbs.push(orb);
+    while (this.playerOrbs.length > MAX_ACTIVE_ORBS) {
+      const oldestOrb = this.playerOrbs.shift();
+      oldestOrb?.container.destroy();
+    }
+
+    this.updateHud();
+  }
+
+  updatePlayerOrbsState() {
+    if (!this.playerOrbs.length) {
+      return;
+    }
+
+    let removedCount = 0;
+    for (let i = this.playerOrbs.length - 1; i >= 0; i -= 1) {
+      const orb = this.playerOrbs[i];
+      const orbLifespanSeconds = orb.lifespanSeconds ?? ORB_LIFETIME_SECONDS;
+      const fadeStartSeconds = Math.min(ORB_FADE_START_SECONDS, orbLifespanSeconds * 0.75);
+      const ageSeconds = (this.time.now - orb.spawnedAtMs) / 1000;
+      if (ageSeconds >= orbLifespanSeconds) {
+        orb.container.destroy();
+        this.playerOrbs.splice(i, 1);
+        removedCount += 1;
+        continue;
+      }
+
+      const fadeWindow = Math.max(0.0001, orbLifespanSeconds - fadeStartSeconds);
+      const fadeProgress =
+        ageSeconds <= fadeStartSeconds
+          ? 0
+          : Phaser.Math.Clamp((ageSeconds - fadeStartSeconds) / fadeWindow, 0, 1);
+
+      orb.strengthScale = Phaser.Math.Linear(1, ORB_MIN_STRENGTH_SCALE, fadeProgress);
+
+      const baseAlpha = Phaser.Math.Linear(1, ORB_MIN_VISUAL_ALPHA, fadeProgress);
+      const flashWave = (Math.sin((this.time.now + i * 180) * ORB_WEAKEN_FLASH_SPEED) + 1) * 0.5;
+      const flashAlpha = flashWave * ORB_WEAKEN_FLASH_INTENSITY * fadeProgress;
+      orb.container.setAlpha(Math.min(1, baseAlpha + flashAlpha));
+
+      const boundaryPulse =
+        1 + Math.sin((this.time.now + i * 180) * ORB_WEAKEN_FLASH_SPEED * 0.75) * ORB_BOUNDARY_PULSE_SCALE * fadeProgress;
+      orb.field.setScale(boundaryPulse);
+    }
+
+    if (removedCount > 0) {
+      this.updateHud();
+    }
   }
 
   startRound() {
+    if (this.playerOrbs.length) {
+      this.playerOrbs.forEach((orb) => orb.container.destroy());
+      this.playerOrbs = [];
+    }
+
     const count = this.round + 2;
     for (let i = 0; i < count; i += 1) {
       this.spawnShape();
@@ -385,24 +546,31 @@ class GameScene extends Phaser.Scene {
   spawnShape() {
     const style = Phaser.Utils.Array.GetRandom(SHAPE_STYLES);
     const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
-    const spawnRadius = Phaser.Math.Between(150, 280);
+    const spawnRadius = Phaser.Math.Between(SHAPE_SPAWN_RADIUS_MIN, SHAPE_SPAWN_RADIUS_MAX);
     const x = this.center.x + Math.cos(angle) * spawnRadius;
     const y = this.center.y + Math.sin(angle) * spawnRadius;
-    const tangent = angle + Math.PI / 2;
+    const radialX = Math.cos(angle);
+    const radialY = Math.sin(angle);
+    const orbitDirection = Phaser.Math.RND.sign();
+    const tangentX = -radialY * orbitDirection;
+    const tangentY = radialX * orbitDirection;
+
     // Simplified circular orbit seed speed: v ≈ sqrt(GM / r).
     const baseSpeed = Math.sqrt(BASE_ORBIT_SPEED_FACTOR / spawnRadius);
-    const speed = baseSpeed * Phaser.Math.FloatBetween(0.86, 1.22);
+    const tangentialSpeed = baseSpeed * Phaser.Math.FloatBetween(0.92, 1.06);
+    const outwardDrift = baseSpeed * Phaser.Math.FloatBetween(0.14, 0.26);
 
     const shape = {
       id: this.shapeId++,
       x,
       y,
-      vx: Math.cos(tangent) * speed,
-      vy: Math.sin(tangent) * speed,
+      vx: tangentX * tangentialSpeed + radialX * outwardDrift,
+      vy: tangentY * tangentialSpeed + radialY * outwardDrift,
       size: Phaser.Math.Between(9, 16),
       style,
-      spin: Phaser.Math.FloatBetween(-2.2, 2.2),
+      spin: Phaser.Math.FloatBetween(-2.2, 2.2) * SHAPE_SPIN_SCALE,
       rotation: Phaser.Math.FloatBetween(0, Math.PI * 2),
+      offScreenDuration: 0,
       gfx: this.add.graphics(),
     };
 
@@ -442,15 +610,17 @@ class GameScene extends Phaser.Scene {
   updateHud() {
     this.hud.round.setText(`Round: ${this.round}`);
     this.hud.score.setText(`Escaped: ${this.roundScore}`);
-    this.hud.lost.setText(`Lost to sun: ${this.destroyedCount}/3`);
+    this.hud.lost.setText(`Lost: ${this.destroyedCount}/3`);
     this.hud.total.setText(`Total saved: ${this.totalSaved}`);
+    this.hud.orbs.setText(`Orbs: ${this.playerOrbs.length}/${MAX_ACTIVE_ORBS}`);
   }
 
   endGame() {
     this.gameEnded = true;
-    if (this.playerOrb) {
-      this.playerOrb.container.destroy();
-      this.playerOrb = null;
+    if (this.playerOrbs.length) {
+      this.playerOrbs.forEach((orb) => orb.container.destroy());
+      this.playerOrbs = [];
+      this.updateHud();
     }
 
     this.time.delayedCall(700, () => {
@@ -477,44 +647,108 @@ class GameScene extends Phaser.Scene {
   }
 
   applyOrbGravity(shape, delta) {
-    if (!this.playerOrb) {
+    if (!this.playerOrbs.length) {
       return;
     }
 
-    const dx = this.playerOrb.x - shape.x;
-    const dy = this.playerOrb.y - shape.y;
-    const r2 = Math.max(dx * dx + dy * dy, MIN_ORB_GRAVITY_DISTANCE_SQ);
-    const r = Math.sqrt(r2);
-    const pull = (this.playerOrb.gravity / r2) * this.playerOrb.polarity;
+    for (const orb of this.playerOrbs) {
+      const dx = orb.x - shape.x;
+      const dy = orb.y - shape.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > orb.maxEffectRadius) {
+        continue;
+      }
 
-    shape.vx += (dx / r) * pull * delta;
-    shape.vy += (dy / r) * pull * delta;
+      const r2 = Math.max(dx * dx + dy * dy, MIN_ORB_GRAVITY_DISTANCE_SQ);
+      const r = Math.sqrt(r2);
+      const orbStrength = orb.strengthScale ?? 1;
+      const perOrbForceScale = orb.forceScale ?? 1;
 
-    if (this.playerOrb.swirl !== 0) {
-      const swirl = (this.playerOrb.swirl / r2) * delta;
-      shape.vx += (-dy / r) * swirl;
-      shape.vy += (dx / r) * swirl;
+      if (orb.forceMode === "velocity-boost") {
+        const speed = Math.sqrt(shape.vx * shape.vx + shape.vy * shape.vy);
+        if (speed > 0.0001) {
+          const boost = ((orb.gravity * ORB_FORCE_SCALE * perOrbForceScale * orbStrength) / r2) * delta;
+          shape.vx += (shape.vx / speed) * boost;
+          shape.vy += (shape.vy / speed) * boost;
+        }
+        continue;
+      }
+
+      if (orb.forceMode === "radial-align") {
+        const towardX = dx / r;
+        const towardY = dy / r;
+        const speed = Math.sqrt(shape.vx * shape.vx + shape.vy * shape.vy);
+        if (speed > 0.0001) {
+          const headingX = shape.vx / speed;
+          const headingY = shape.vy / speed;
+          const headingDot = headingX * towardX + headingY * towardY;
+          const targetSign = headingDot >= 0 ? 1 : -1;
+          const targetX = towardX * targetSign;
+          const targetY = towardY * targetSign;
+
+          const weakPull = ((orb.gravity * ORB_FORCE_SCALE * perOrbForceScale * orbStrength) / r2) * delta;
+          shape.vx += targetX * weakPull;
+          shape.vy += targetY * weakPull;
+
+          const adjustedSpeed = Math.sqrt(shape.vx * shape.vx + shape.vy * shape.vy);
+          if (adjustedSpeed > 0.0001) {
+            const adjustedDirX = shape.vx / adjustedSpeed;
+            const adjustedDirY = shape.vy / adjustedSpeed;
+            const alignStrength = Phaser.Math.Clamp((orb.alignStrength ?? 0.9) * delta, 0, 1);
+            const blendedX = Phaser.Math.Linear(adjustedDirX, targetX, alignStrength);
+            const blendedY = Phaser.Math.Linear(adjustedDirY, targetY, alignStrength);
+            const blendLength = Math.sqrt(blendedX * blendedX + blendedY * blendedY);
+            if (blendLength > 0.0001) {
+              shape.vx = (blendedX / blendLength) * adjustedSpeed;
+              shape.vy = (blendedY / blendLength) * adjustedSpeed;
+            }
+          }
+        }
+        continue;
+      }
+
+      const radialVelocity = (shape.vx * dx + shape.vy * dy) / r;
+      const approachScale = radialVelocity >= 0 ? ORB_APPROACH_FORCE_SCALE : ORB_DEPART_FORCE_SCALE;
+      const pull = ((orb.gravity * ORB_FORCE_SCALE * perOrbForceScale * approachScale * orbStrength) / r2) * orb.polarity;
+
+      shape.vx += (dx / r) * pull * delta;
+      shape.vy += (dy / r) * pull * delta;
+
+      if (orb.swirl !== 0) {
+        const swirl = ((orb.swirl * ORB_FORCE_SCALE * perOrbForceScale * orbStrength) / r2) * delta;
+        shape.vx += (-dy / r) * swirl;
+        shape.vy += (dx / r) * swirl;
+      }
     }
   }
 
   update(_, deltaMs) {
     // Cap frame delta to avoid unstable jumps during lag spikes.
-    const delta = Math.min(MAX_FRAME_TIME, deltaMs / 1000);
+    const delta = Math.min(MAX_FRAME_TIME, deltaMs / 1000) * TARGET_FRAME_RATE;
+    const visualDelta = delta / TARGET_FRAME_RATE;
+    const physicsDelta = delta * GAMEPLAY_SPEED;
 
-    this.sunCore.rotation += delta * 0.35;
+    this.sunCore.rotation += visualDelta * 0.35;
+    const pulseWave = Math.sin(this.time.now * SUN_PULSE_SPEED);
+    const pulseShape = Math.sign(pulseWave) * Math.pow(Math.abs(pulseWave), 1.9);
+    const undertone = Math.sin(this.time.now * SUN_PULSE_SPEED * 0.5) * 0.22;
+    const sunPulse = 1 + (pulseShape + undertone) * SUN_PULSE_AMPLITUDE;
+    this.sunCore.setScale(sunPulse);
 
-    if (this.playerOrb) {
-      this.playerOrb.outer.rotation += delta * 2.4;
-      this.playerOrb.inner.rotation -= delta * 2.8;
+    this.updatePlayerOrbsState();
+
+    for (const orb of this.playerOrbs) {
+      orb.outer.rotation += visualDelta * 2.4;
+      orb.inner.rotation -= visualDelta * 2.8;
     }
 
     for (const shape of [...this.activeShapes]) {
-      this.applyCentralGravity(shape, delta);
-      this.applyOrbGravity(shape, delta);
+      this.applyCentralGravity(shape, physicsDelta);
+      this.applyOrbGravity(shape, physicsDelta);
 
-      shape.x += shape.vx;
-      shape.y += shape.vy;
-      shape.rotation += shape.spin * delta;
+      shape.x += shape.vx * physicsDelta;
+      shape.y += shape.vy * physicsDelta;
+      shape.rotation += shape.spin * visualDelta;
       this.renderShape(shape);
 
       const fromCenter = Phaser.Math.Distance.Between(shape.x, shape.y, this.center.x, this.center.y);
@@ -529,7 +763,19 @@ class GameScene extends Phaser.Scene {
         continue;
       }
 
-      if (fromCenter >= this.escapeRadius) {
+      const isOffScreen =
+        shape.x + shape.size < 0 ||
+        shape.x - shape.size > this.scale.width ||
+        shape.y + shape.size < 0 ||
+        shape.y - shape.size > this.scale.height;
+
+      if (isOffScreen) {
+        shape.offScreenDuration += visualDelta;
+      } else {
+        shape.offScreenDuration = 0;
+      }
+
+      if (shape.offScreenDuration >= SHAPE_OFFSCREEN_ESCAPE_SECONDS) {
         this.roundScore += 1;
         this.totalSaved += 1;
         saveTotalSaved(this.totalSaved);
@@ -613,9 +859,10 @@ class GameOverScene extends Phaser.Scene {
 const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: "game",
-  backgroundColor: "rgba(0,0,0,0)",
-  width: 1100,
-  height: 760,
+  transparent: true,
+  backgroundColor: 0x000000,
+  width: GAME_WORLD_WIDTH,
+  height: GAME_WORLD_HEIGHT,
   scene: [MenuScene, OrbSelectScene, GameScene, GameOverScene],
   scale: {
     mode: Phaser.Scale.FIT,
